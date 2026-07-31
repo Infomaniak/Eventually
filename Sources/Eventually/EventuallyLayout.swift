@@ -29,7 +29,7 @@ public struct EventuallyLayout: Layout {
     public struct Cache {
         var frames: [Int: CGRect]?
         var layoutWidth: CGFloat?
-        var coveredTextHeights: [Int: CGFloat] = [:]
+        var coveredTextHeights: [Int: CGFloat]?
     }
 
     // This must be the beginning of date to display. 00:00:00 in local time
@@ -108,6 +108,12 @@ public struct EventuallyLayout: Layout {
         cache.layoutWidth = proposal.width
 
         guard !subviews.isEmpty else {
+            if cache.coveredTextHeights != [:] {
+                cache.coveredTextHeights = [:]
+                Task { @MainActor in
+                    onCoveredIndicesChange([:])
+                }
+            }
             return
         }
 
@@ -286,7 +292,7 @@ public struct EventuallyLayout: Layout {
 
             hStackStartIndex = index
 
-            guard isLastElement else { continue}
+            guard isLastElement else { continue }
 
             let frames = cache.frames ?? [:]
             let orderedIndices = sortedSubviews.map { $0.0 }

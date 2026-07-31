@@ -29,6 +29,7 @@ public struct EventuallyLayout: Layout {
     public struct Cache {
         var frames: [Int: CGRect]?
         var layoutWidth: CGFloat?
+        var coveredTextHeights: [Int: CGFloat] = [:]
     }
 
     // This must be the beginning of date to display. 00:00:00 in local time
@@ -37,15 +38,20 @@ public struct EventuallyLayout: Layout {
     // The height of one hour slot on a timeline (in points).
     private let hourSlotHeight: CGFloat
     private let config: EventuallyConfiguration
+    private let onCoveredIndicesChange:
+        @MainActor @Sendable ([Int: CGFloat]) -> Void
 
     public init(
         startOfDay: Date,
         hourSlotHeight: CGFloat,
-        config: EventuallyConfiguration = .init()
+        config: EventuallyConfiguration = .init(),
+        onCoveredIndicesChange:
+        @escaping @MainActor @Sendable ([Int: CGFloat]) -> Void = { _ in }
     ) {
         self.startOfDay = startOfDay
         self.hourSlotHeight = hourSlotHeight
         self.config = config
+        self.onCoveredIndicesChange = onCoveredIndicesChange
     }
 
     public func sizeThatFits(
@@ -279,6 +285,47 @@ public struct EventuallyLayout: Layout {
             }
 
             hStackStartIndex = index
+
+            let frames = cache.frames ?? [:]
+            let orderedIndices = sortedSubviews.map { $0.0 }
+            var coveredTextHeights: [Int: CGFloat] = [:]
+
+            for (position, lowerIndex) in orderedIndices.enumerated() {
+                guard let lowerFrame = frames[lowerIndex],
+                      !lowerFrame.isEmpty else {
+                    continue
+                }
+
+                var minCoveringY: CGFloat?
+                for upperIndex in orderedIndices.dropFirst(position + 1) {
+                    guard let upperFrame = frames[upperIndex],
+                          !upperFrame.isEmpty else {
+                        continue
+                    }
+
+                    let intersection = lowerFrame.intersection(upperFrame)
+
+                    if !intersection.isNull,
+                       intersection.width > 1,
+                       intersection.height > 1 {
+                        let coveringY = upperFrame.minY - lowerFrame.minY
+                        if coveringY > 0 {
+                            minCoveringY = min(minCoveringY ?? coveringY, coveringY)
+                        }
+                    }
+                }
+
+                if let availableHeight = minCoveringY {
+                    coveredTextHeights[lowerIndex] = availableHeight
+                }
+            }
+
+            if cache.coveredTextHeights != coveredTextHeights {
+                cache.coveredTextHeights = coveredTextHeights
+                Task { @MainActor [coveredTextHeights] in
+                    onCoveredIndicesChange(coveredTextHeights)
+                }
+            }
         }
     }
 }

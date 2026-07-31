@@ -286,6 +286,8 @@ public struct EventuallyLayout: Layout {
 
             hStackStartIndex = index
 
+            guard isLastElement else { continue}
+
             let frames = cache.frames ?? [:]
             let orderedIndices = sortedSubviews.map { $0.0 }
             var coveredTextHeights: [Int: CGFloat] = [:]

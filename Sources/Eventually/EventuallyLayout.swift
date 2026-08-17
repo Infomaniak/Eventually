@@ -30,7 +30,10 @@ public struct EventuallyLayout: Layout {
         var frames: [Int: CGRect]?
         var layoutWidth: CGFloat?
         var horizontalHourSlotHeight: CGFloat?
-        var coveredTextHeights: [Int: CGFloat]?
+
+        var orderedIndices: [Int] = []
+        var coveredTextHeights: [Int: CGFloat] = [:]
+        var reportTask: Task<Void, Never>?
     }
 
     // This must be the beginning of date to display. 00:00:00 in local time
@@ -85,8 +88,12 @@ public struct EventuallyLayout: Layout {
             .replacingUnspecifiedDimensions()
             .width
 
+        let widthChanged = cache.layoutWidth.map {
+            abs($0 - layoutWidth) > 0.5
+        } ?? true
+
         if cache.frames == nil
-            || cache.layoutWidth != layoutWidth
+            || widthChanged
             || cache.horizontalHourSlotHeight != horizontalHourSlotHeight {
             calculateLayout(
                 proposal: proposal,
@@ -116,6 +123,12 @@ public struct EventuallyLayout: Layout {
                 y: bounds.minY + frame.minY
             ), proposal: size)
         }
+
+        calculateCoveredTextHeights(
+            frames: liveFrames,
+            orderedIndices: cache.orderedIndices,
+            cache: &cache
+        )
     }
 
     private func calculateLayout(
@@ -123,6 +136,7 @@ public struct EventuallyLayout: Layout {
         subviews: Subviews,
         cache: inout Cache
     ) {
+        cache.orderedIndices = []
         cache.frames = [:]
         cache.layoutWidth = proposal.replacingUnspecifiedDimensions().width
         cache.horizontalHourSlotHeight = horizontalHourSlotHeight
@@ -155,6 +169,8 @@ public struct EventuallyLayout: Layout {
                 ? firstInterval.duration > secondInterval.duration
                 : firstInterval.start < secondInterval.start
         }
+
+        cache.orderedIndices = sortedSubviews.map { $0.offset }
 
         var eventFrames = [CGRect]()
         var hStackStartIndex = 0
@@ -306,49 +322,6 @@ public struct EventuallyLayout: Layout {
             }
 
             hStackStartIndex = index
-
-            guard isLastElement else { continue }
-
-            let frames = cache.frames ?? [:]
-            let orderedIndices = sortedSubviews.map { $0.0 }
-            var coveredTextHeights: [Int: CGFloat] = [:]
-
-            for (position, lowerIndex) in orderedIndices.enumerated() {
-                guard let lowerFrame = frames[lowerIndex],
-                      !lowerFrame.isEmpty else {
-                    continue
-                }
-
-                var minCoveringY: CGFloat?
-                for upperIndex in orderedIndices.dropFirst(position + 1) {
-                    guard let upperFrame = frames[upperIndex],
-                          !upperFrame.isEmpty else {
-                        continue
-                    }
-
-                    let intersection = lowerFrame.intersection(upperFrame)
-
-                    if !intersection.isNull,
-                       intersection.width > 1,
-                       intersection.height > 1 {
-                        let coveringY = upperFrame.minY - lowerFrame.minY
-                        if coveringY > 0 {
-                            minCoveringY = min(minCoveringY ?? coveringY, coveringY)
-                        }
-                    }
-                }
-
-                if let availableHeight = minCoveringY {
-                    coveredTextHeights[lowerIndex] = availableHeight
-                }
-            }
-
-            if cache.coveredTextHeights != coveredTextHeights {
-                cache.coveredTextHeights = coveredTextHeights
-                Task { @MainActor [coveredTextHeights] in
-                    onCoveredIndicesChange(coveredTextHeights)
-                }
-            }
         }
     }
 
@@ -395,5 +368,71 @@ public struct EventuallyLayout: Layout {
         }
 
         return liveFrames
+    }
+
+    private func calculateCoveredTextHeights(
+        frames: [Int: CGRect],
+        orderedIndices: [Int],
+        cache: inout Cache
+    ) {
+        var coveredTextHeights: [Int: CGFloat] = [:]
+
+        for (position, lowerIndex) in orderedIndices.enumerated() {
+            guard
+                let lowerFrame = frames[lowerIndex],
+                !lowerFrame.isEmpty
+            else {
+                continue
+            }
+
+            var minCoveringY: CGFloat?
+
+            for upperIndex in orderedIndices.dropFirst(position + 1) {
+                guard
+                    let upperFrame = frames[upperIndex],
+                    !upperFrame.isEmpty
+                else {
+                    continue
+                }
+
+                let intersection = lowerFrame.intersection(upperFrame)
+
+                guard
+                    !intersection.isNull,
+                    intersection.width > 1,
+                    intersection.height > 1
+                else {
+                    continue
+                }
+
+                let coveringY =
+                    upperFrame.minY - lowerFrame.minY
+
+                if coveringY > 0 {
+                    minCoveringY = min(
+                        minCoveringY ?? coveringY,
+                        coveringY
+                    )
+                }
+            }
+
+            if let minCoveringY {
+                coveredTextHeights[lowerIndex] = minCoveringY
+            }
+        }
+
+        if cache.coveredTextHeights != coveredTextHeights {
+            cache.coveredTextHeights = coveredTextHeights
+
+            cache.reportTask?.cancel()
+
+            cache.reportTask = Task { @MainActor [coveredTextHeights] in
+                guard !Task.isCancelled else {
+                    return
+                }
+
+                onCoveredIndicesChange(coveredTextHeights)
+            }
+        }
     }
 }

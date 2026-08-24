@@ -88,8 +88,9 @@ public struct EventuallyLayout: Layout {
             .replacingUnspecifiedDimensions()
             .width
 
+        let widthTolerance = 0.5
         let widthChanged = cache.layoutWidth.map {
-            abs($0 - layoutWidth) > 0.5
+            abs($0 - layoutWidth) > widthTolerance
         } ?? true
 
         if cache.frames == nil

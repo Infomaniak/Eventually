@@ -29,7 +29,11 @@ public struct EventuallyLayout: Layout {
     public struct Cache {
         var frames: [Int: CGRect]?
         var layoutWidth: CGFloat?
-        var coveredTextHeights: [Int: CGFloat]?
+        var horizontalHourSlotHeight: CGFloat?
+
+        var orderedIndices: [Int] = []
+        var coveredTextHeights: [Int: CGFloat] = [:]
+        var reportTask: Task<Void, Never>?
     }
 
     // This must be the beginning of date to display. 00:00:00 in local time
@@ -37,6 +41,7 @@ public struct EventuallyLayout: Layout {
     private let startOfDay: Date
     // The height of one hour slot on a timeline (in points).
     private let hourSlotHeight: CGFloat
+    private let horizontalHourSlotHeight: CGFloat
     private let config: EventuallyConfiguration
     private let onCoveredIndicesChange:
         @MainActor @Sendable ([Int: CGFloat]) -> Void
@@ -44,12 +49,15 @@ public struct EventuallyLayout: Layout {
     public init(
         startOfDay: Date,
         hourSlotHeight: CGFloat,
+        horizontalHourSlotHeight: CGFloat? = nil,
         config: EventuallyConfiguration = .init(),
         onCoveredIndicesChange:
         @escaping @MainActor @Sendable ([Int: CGFloat]) -> Void = { _ in }
     ) {
         self.startOfDay = startOfDay
         self.hourSlotHeight = hourSlotHeight
+        self.horizontalHourSlotHeight =
+            horizontalHourSlotHeight ?? hourSlotHeight
         self.config = config
         self.onCoveredIndicesChange = onCoveredIndicesChange
     }
@@ -72,20 +80,40 @@ public struct EventuallyLayout: Layout {
         subviews: Subviews,
         cache: inout Cache
     ) {
-        guard
-            cache.layoutWidth == proposal.width, let frames = cache.frames
-        else {
+        let eventIntervals = subviews.map {
+            $0[EventuallyLayoutKey.self]
+        }
+
+        let layoutWidth = proposal
+            .replacingUnspecifiedDimensions()
+            .width
+
+        let widthTolerance = 0.5
+        let widthChanged = cache.layoutWidth.map {
+            abs($0 - layoutWidth) > widthTolerance
+        } ?? true
+
+        if cache.frames == nil
+            || widthChanged
+            || cache.horizontalHourSlotHeight != horizontalHourSlotHeight {
             calculateLayout(
-                in: bounds,
                 proposal: proposal,
                 subviews: subviews,
                 cache: &cache
             )
+        }
+
+        guard let cachedFrames = cache.frames else {
             return
         }
 
+        let liveFrames = makeLiveFrames(
+            cachedFrames: cachedFrames,
+            eventIntervals: eventIntervals
+        )
+
         for (index, subview) in subviews.enumerated() {
-            guard let frame = frames[index] else {
+            guard let frame = liveFrames[index] else {
                 continue
             }
             let size = ProposedViewSize(frame.size)
@@ -96,16 +124,23 @@ public struct EventuallyLayout: Layout {
                 y: bounds.minY + frame.minY
             ), proposal: size)
         }
+
+        calculateCoveredTextHeights(
+            frames: liveFrames,
+            orderedIndices: cache.orderedIndices,
+            cache: &cache
+        )
     }
 
     private func calculateLayout(
-        in bounds: CGRect,
         proposal: ProposedViewSize,
         subviews: Subviews,
         cache: inout Cache
     ) {
+        cache.orderedIndices = []
         cache.frames = [:]
-        cache.layoutWidth = proposal.width
+        cache.layoutWidth = proposal.replacingUnspecifiedDimensions().width
+        cache.horizontalHourSlotHeight = horizontalHourSlotHeight
 
         guard !subviews.isEmpty else {
             if cache.coveredTextHeights != [:] {
@@ -118,8 +153,8 @@ public struct EventuallyLayout: Layout {
         }
 
         let layoutSize = proposal.replacingUnspecifiedDimensions()
-        let titleHeightInSeconds = 3600 / hourSlotHeight * config.titleHeight
-        let pointsPerSecond = hourSlotHeight / 3600
+        let titleHeightInSeconds = 3600 / horizontalHourSlotHeight * config.titleHeight
+        let pointsPerSecond = horizontalHourSlotHeight / 3600
         let fullHeight = 24 * 3600 * pointsPerSecond
 
         let sortedSubviews = subviews.enumerated().sorted { first, second in
@@ -135,6 +170,8 @@ public struct EventuallyLayout: Layout {
                 ? firstInterval.duration > secondInterval.duration
                 : firstInterval.start < secondInterval.start
         }
+
+        cache.orderedIndices = sortedSubviews.map { $0.offset }
 
         var eventFrames = [CGRect]()
         var hStackStartIndex = 0
@@ -281,58 +318,121 @@ public struct EventuallyLayout: Layout {
                         )
                     )
 
-                    let size = ProposedViewSize(finalFrame.size)
-                    sortedSubviews[eventIndex].1.place(at: CGPoint(
-                        x: bounds.minX + finalFrame.minX,
-                        y: bounds.minY + finalFrame.minY
-                    ), proposal: size)
                     cache.frames?[sortedSubviews[eventIndex].0] = finalFrame
                 }
             }
 
             hStackStartIndex = index
+        }
+    }
 
-            guard isLastElement else { continue }
+    // Keeps the cached x/width and replaces only y/height with the live scale.
+    private func makeLiveFrames(
+        cachedFrames: [Int: CGRect],
+        eventIntervals: [DateInterval?]
+    ) -> [Int: CGRect] {
+        let pointsPerSecond = hourSlotHeight / 3600
+        let fullHeight = 24 * 3600 * pointsPerSecond
+        var liveFrames = [Int: CGRect]()
 
-            let frames = cache.frames ?? [:]
-            let orderedIndices = sortedSubviews.map { $0.0 }
-            var coveredTextHeights: [Int: CGFloat] = [:]
+        for (index, cachedFrame) in cachedFrames {
+            guard
+                !cachedFrame.isEmpty,
+                eventIntervals.indices.contains(index),
+                let interval = eventIntervals[index]
+            else {
+                liveFrames[index] = .zero
+                continue
+            }
 
-            for (position, lowerIndex) in orderedIndices.enumerated() {
-                guard let lowerFrame = frames[lowerIndex],
-                      !lowerFrame.isEmpty else {
+            let localStartDate = max(interval.start, startOfDay)
+            let localInterval = DateInterval(
+                start: localStartDate,
+                end: max(interval.end, startOfDay)
+            )
+            let originY = CGFloat(
+                localStartDate.timeIntervalSince(startOfDay)
+            ) * pointsPerSecond
+            let maxHeight = fullHeight - originY
+            let height = max(
+                min(localInterval.duration * pointsPerSecond, maxHeight),
+                config.minEventHeight
+            )
+            .rounded(to: 2, rule: .down) - 1
+
+            liveFrames[index] = CGRect(
+                x: cachedFrame.minX,
+                y: originY,
+                width: cachedFrame.width,
+                height: height
+            )
+        }
+
+        return liveFrames
+    }
+
+    private func calculateCoveredTextHeights(
+        frames: [Int: CGRect],
+        orderedIndices: [Int],
+        cache: inout Cache
+    ) {
+        var coveredTextHeights: [Int: CGFloat] = [:]
+
+        for (position, lowerIndex) in orderedIndices.enumerated() {
+            guard
+                let lowerFrame = frames[lowerIndex],
+                !lowerFrame.isEmpty
+            else {
+                continue
+            }
+
+            var minCoveringY: CGFloat?
+
+            for upperIndex in orderedIndices.dropFirst(position + 1) {
+                guard
+                    let upperFrame = frames[upperIndex],
+                    !upperFrame.isEmpty
+                else {
                     continue
                 }
 
-                var minCoveringY: CGFloat?
-                for upperIndex in orderedIndices.dropFirst(position + 1) {
-                    guard let upperFrame = frames[upperIndex],
-                          !upperFrame.isEmpty else {
-                        continue
-                    }
+                let intersection = lowerFrame.intersection(upperFrame)
 
-                    let intersection = lowerFrame.intersection(upperFrame)
-
-                    if !intersection.isNull,
-                       intersection.width > 1,
-                       intersection.height > 1 {
-                        let coveringY = upperFrame.minY - lowerFrame.minY
-                        if coveringY > 0 {
-                            minCoveringY = min(minCoveringY ?? coveringY, coveringY)
-                        }
-                    }
+                guard
+                    !intersection.isNull,
+                    intersection.width > 1,
+                    intersection.height > 1
+                else {
+                    continue
                 }
 
-                if let availableHeight = minCoveringY {
-                    coveredTextHeights[lowerIndex] = availableHeight
+                let coveringY =
+                    upperFrame.minY - lowerFrame.minY
+
+                if coveringY > 0 {
+                    minCoveringY = min(
+                        minCoveringY ?? coveringY,
+                        coveringY
+                    )
                 }
             }
 
-            if cache.coveredTextHeights != coveredTextHeights {
-                cache.coveredTextHeights = coveredTextHeights
-                Task { @MainActor [coveredTextHeights] in
-                    onCoveredIndicesChange(coveredTextHeights)
+            if let minCoveringY {
+                coveredTextHeights[lowerIndex] = minCoveringY
+            }
+        }
+
+        if cache.coveredTextHeights != coveredTextHeights {
+            cache.coveredTextHeights = coveredTextHeights
+
+            cache.reportTask?.cancel()
+
+            cache.reportTask = Task { @MainActor [coveredTextHeights] in
+                guard !Task.isCancelled else {
+                    return
                 }
+
+                onCoveredIndicesChange(coveredTextHeights)
             }
         }
     }

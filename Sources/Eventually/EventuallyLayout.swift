@@ -199,8 +199,12 @@ public struct EventuallyLayout: Layout {
                 let localInterval = DateInterval(start: localStartDate, end: max(interval.end, startOfDay))
                 let originY = CGFloat(localStartDate.timeIntervalSince(startOfDay)) * pointsPerSecond
                 let maxHeight = fullHeight - originY
-                // round it down so fractional values do not accidentally intersect, and -1 to make a padding between vertical events
-                let height = max(min(localInterval.duration * pointsPerSecond, maxHeight), config.minEventHeight).rounded(to: 2, rule: .down) - 1
+                // Round down so fractional values do not accidentally intersect.
+                let height = max(
+                    min(localInterval.duration * pointsPerSecond, maxHeight),
+                    config.minEventHeight
+                )
+                .rounded(to: 2, rule: .down)
                 eventRect = CGRect(
                     x: 0,
                     y: originY,
@@ -311,10 +315,13 @@ public struct EventuallyLayout: Layout {
                     eventFrames[eventIndex] = eventRect
 
                     let finalFrame = CGRect(
-                        origin: eventRect.origin,
+                        origin: CGPoint(
+                            x: eventRect.minX,
+                            y: eventRect.minY + config.vSpacing
+                        ),
                         size: CGSize(
                             width: max(eventRect.size.width - config.hSpacing, 0),
-                            height: eventRect.size.height
+                            height: max(eventRect.size.height - 2 * config.vSpacing, 0)
                         )
                     )
 
@@ -358,13 +365,13 @@ public struct EventuallyLayout: Layout {
                 min(localInterval.duration * pointsPerSecond, maxHeight),
                 config.minEventHeight
             )
-            .rounded(to: 2, rule: .down) - 1
+            .rounded(to: 2, rule: .down)
 
             liveFrames[index] = CGRect(
                 x: cachedFrame.minX,
-                y: originY,
+                y: originY + config.vSpacing,
                 width: cachedFrame.width,
-                height: height
+                height: max(height - 2 * config.vSpacing, 0)
             )
         }
 

@@ -301,6 +301,7 @@ public struct EventuallyLayout: Layout {
                 let eventWidth = max((frame.width - frameHPadding) / CGFloat(eventIndices.count), config.minEventWidth)
                 for (i, eventIndex) in eventIndices.enumerated() {
                     let originX = frame.minX + eventWidth * CGFloat(i) + frameHPadding
+                    let horizontalSpacing = i < eventIndices.count - 1 ? config.hSpacing : 0
                     var eventRect = eventFrames[eventIndex]
 
                     // if the final event frame does not fit the container frame, then just collapse the final frame
@@ -320,7 +321,7 @@ public struct EventuallyLayout: Layout {
                             y: eventRect.minY + config.vSpacing
                         ),
                         size: CGSize(
-                            width: max(eventRect.size.width - config.hSpacing, 0),
+                            width: max(eventRect.size.width - horizontalSpacing, 0),
                             height: max(eventRect.size.height - 2 * config.vSpacing, 0)
                         )
                     )
